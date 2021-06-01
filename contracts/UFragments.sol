@@ -4,6 +4,10 @@ import "./_external/SafeMath.sol";
 import "./_external/Ownable.sol";
 import "./_external/ERC20Detailed.sol";
 
+// ERC3156 Interfaces
+import "./_external/IERC3156FlashLender.sol";
+import "./_external/IERC3156FlashBorrower.sol";
+
 import "./lib/SafeMathInt.sol";
 
 /**
@@ -16,7 +20,7 @@ import "./lib/SafeMathInt.sol";
  *      We support splitting the currency in expansion and combining the currency on contraction by
  *      changing the exchange rate between the hidden 'gons' and the public 'fragments'.
  */
-contract UFragments is ERC20Detailed, Ownable {
+contract UFragments is ERC20Detailed, IERC3156FlashLender, Ownable {
     // PLEASE READ BEFORE CHANGING ANY ACCOUNTING OR MATH
     // Anytime there is division, there is a risk of numerical instability from rounding errors. In
     // order to minimize this risk, we adhere to the following guidelines:
@@ -383,5 +387,94 @@ contract UFragments is ERC20Detailed, Ownable {
 
         _allowedFragments[owner][spender] = value;
         emit Approval(owner, spender, value);
+    }
+
+    ////////////////////////////////////////
+    // ERC3156 FlashLender implementation //
+    ////////////////////////////////////////
+
+    bytes32 public constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
+
+    modifier onlyAMPL(address token) {
+        require(token == address(this), "token != AMPL");
+        _;
+    }
+
+    modifier validAmount(uint256 amount) {
+        require(amount > 0, "!amount > 0");
+        require(amount <= _totalSupply, "!amount <= totalSupply");
+        _;
+    }
+
+    function maxFlashLoan(address token)
+        external
+        view
+        onlyAMPL(token)
+        override
+        returns (uint256)
+    {
+        return _totalSupply;
+    }
+
+    function flashFee(address token,
+                      uint256 amount)
+        external
+        view
+        onlyAMPL(token)
+        validAmount(amount)
+        override
+        returns (uint256)
+    {
+        return _flashFlee(token, amount);
+    }
+
+    function _flashFlee(address token,
+                        uint256 amount)
+        internal
+        view
+        returns (uint256)
+    {
+        return uint256(0);
+    }
+
+    function flashLoan(IERC3156FlashBorrower receiver,
+                       address token,
+                       uint256 amount,
+                       bytes calldata data)
+        external
+        onlyAMPL(token)
+        validAmount(amount)
+        override
+        returns (bool)
+    {
+        // Calculate gonAmount from amount
+        uint256 gonAmount = amount.mul(_gonsPerFragment);
+
+        // Mint new AMPLs to receiver
+        _gonBalances[address(receiver)] =
+            _gonBalances[address(receiver)].add(gonAmount);
+
+        // Get fees
+        uint256 fee = _flashFlee(token, amount);
+        uint256 gonFee = fee.mul(_gonsPerFragment);
+
+        // Call FlashLoan callback
+        require(
+            receiver.onFlashLoan(msg.sender, token, amount, fee, data) == CALLBACK_SUCCESS,
+            "Callback failed"
+        );
+
+        // Check if repay is possible
+        uint256 repay = gonAmount.add(gonFee);
+        require(
+            _gonBalances[address(receiver)] >= repay,
+            "Repay not possible"
+        );
+
+        // Burn AMPLs from receiver
+        _gonBalances[address(receiver)] =
+            _gonBalances[address(receiver)].sub(repay);
+
+        return true;
     }
 }
